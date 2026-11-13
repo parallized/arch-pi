@@ -1,6 +1,6 @@
 import { EventEmitter } from 'node:events';
 import { existsSync, mkdirSync, readdirSync, readFileSync } from 'node:fs';
-import { mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, rename, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, join } from 'node:path';
 import { Agent } from '@mariozechner/pi-agent-core';
@@ -22,6 +22,7 @@ import {
   CreateWindowInput,
   DispatchPlanInput,
   ArchpiEvent,
+  ModelsDevCache,
   PlanSpec,
   ProjectInfo,
   ProviderConfig,
@@ -290,12 +291,19 @@ export interface ArchpiRuntimeOptions {
   resourcesDir?: string;
 }
 
+interface AgyCumulativeUsage {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+}
+
 interface PersistedStateFile {
   version: 1;
   projects: ProjectInfo[];
   windows: AliveWindow[];
   tasks: TaskCard[];
   agyConversations: Record<string, string>;
+  agyCumulativeUsage?: Record<string, AgyCumulativeUsage>;
 }
 
 interface PersistedSettingsFile extends UserSettings {
@@ -309,6 +317,7 @@ export class ArchpiRuntime {
   private readonly archpiHome = join(homedir(), '.archpi');
   private readonly stateFile = join(this.archpiHome, 'state.json');
   private readonly settingsFile = join(this.archpiHome, 'settings.json');
+  private readonly modelsDevCacheFile = join(this.archpiHome, 'models-dev-cache.json');
   private readonly messagesDir = join(this.archpiHome, 'messages');
   private readonly plansDir = join(this.archpiHome, 'plans');
   private writeQueues = new Map<string, Promise<void>>();
@@ -316,6 +325,7 @@ export class ArchpiRuntime {
   private windows = new Map<string, AliveWindow>();
   private agents = new Map<string, Agent>();
   private agyConversations = new Map<string, string>();
+  private agyCumulativeUsage = new Map<string, AgyCumulativeUsage>();
   private titleGenerationSeq = new Map<string, number>();
   private providerCooldownUntil = new Map<string, number>();
   private providerRegistry: ProviderRegistry;
@@ -323,6 +333,7 @@ export class ArchpiRuntime {
   private tasks = new Map<string, TaskCard>();
   private messagesByWindow = new Map<string, ChatMessage[]>();
   private userSettings: UserSettings = {};
+  private modelsDevCache: ModelsDevCache | null | undefined = undefined;
   private providerConfig: ProviderConfig = {
     provider: 'anthropic',
     modelId: 'claude-3-7-sonnet-20250219',
@@ -356,30 +367,63 @@ export class ArchpiRuntime {
     this.writeQueues.set(key, next);
   }
 
+  private async writeJsonAtomic(filePath: string, data: unknown): Promise<void> {
+    const tmpPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
+    try {
+      await writeFile(tmpPath, JSON.stringify(data, null, 2), 'utf8');
+      await rename(tmpPath, filePath);
+    } catch (err) {
+      await rm(tmpPath, { force: true }).catch(() => {});
+      throw err;
+    }
+  }
+
+  async flushPendingWrites(): Promise<void> {
+    while (this.writeQueues.size > 0) {
+      const pending = Array.from(this.writeQueues.entries());
+      await Promise.allSettled(pending.map(([, promise]) => promise));
+      for (const [key, promise] of pending) {
+        if (this.writeQueues.get(key) === promise) {
+          this.writeQueues.delete(key);
+        }
+      }
+    }
+  }
+
   private persistState(): void {
     const payload: PersistedStateFile = {
       version: 1,
       projects: this.projects,
       windows: Array.from(this.windows.values()),
       tasks: Array.from(this.tasks.values()),
-      agyConversations: Object.fromEntries(this.agyConversations.entries())
+      agyConversations: Object.fromEntries(this.agyConversations.entries()),
+      agyCumulativeUsage: Object.fromEntries(this.agyCumulativeUsage.entries())
     };
     this.enqueueWrite('state', async () => {
       await mkdir(this.archpiHome, { recursive: true });
-      await writeFile(this.stateFile, JSON.stringify(payload, null, 2), 'utf8');
+      await this.writeJsonAtomic(this.stateFile, payload);
     });
   }
 
   private persistSettings(): void {
+    const { modelsDevCache: _ignored, ...restSettings } = this.userSettings;
     const payload: PersistedSettingsFile = {
-      ...this.userSettings,
+      ...restSettings,
       providerConfig: this.providerConfig,
       providerConfigs: this.providerConfigs,
       voiceConfig: this.voiceConfig
     };
     this.enqueueWrite('settings', async () => {
       await mkdir(this.archpiHome, { recursive: true });
-      await writeFile(this.settingsFile, JSON.stringify(payload, null, 2), 'utf8');
+      await this.writeJsonAtomic(this.settingsFile, payload);
+    });
+  }
+
+  private persistModelsDevCache(): void {
+    const cache = this.modelsDevCache ?? null;
+    this.enqueueWrite('modelsDevCache', async () => {
+      await mkdir(this.archpiHome, { recursive: true });
+      await this.writeJsonAtomic(this.modelsDevCacheFile, cache);
     });
   }
 
@@ -389,7 +433,7 @@ export class ArchpiRuntime {
     );
     this.enqueueWrite(`messages:${windowId}`, async () => {
       await mkdir(this.messagesDir, { recursive: true });
-      await writeFile(join(this.messagesDir, `${windowId}.json`), JSON.stringify(msgs, null, 2), 'utf8');
+      await this.writeJsonAtomic(join(this.messagesDir, `${windowId}.json`), msgs);
     });
   }
 
@@ -408,6 +452,7 @@ export class ArchpiRuntime {
       console.error('[archpi/runtime] failed to ensure ~/.archpi dirs:', err);
     }
 
+    let legacyModelsDevCache: ModelsDevCache | null | undefined;
     if (existsSync(this.settingsFile)) {
       try {
         const raw = JSON.parse(readFileSync(this.settingsFile, 'utf8')) as PersistedSettingsFile;
@@ -425,7 +470,7 @@ export class ArchpiRuntime {
         if (Array.isArray(raw.savedProviders)) settings.savedProviders = raw.savedProviders;
         if (raw.activeProviderId !== undefined) settings.activeProviderId = raw.activeProviderId;
         if (raw.roleModels && typeof raw.roleModels === 'object') settings.roleModels = raw.roleModels;
-        if (raw.modelsDevCache !== undefined) settings.modelsDevCache = raw.modelsDevCache;
+        if (raw.modelsDevCache !== undefined) legacyModelsDevCache = raw.modelsDevCache;
         if (raw.quotaLimits && typeof raw.quotaLimits === 'object') settings.quotaLimits = raw.quotaLimits;
         if (typeof raw.quotaAutoRefreshEnabled === 'boolean') {
           settings.quotaAutoRefreshEnabled = raw.quotaAutoRefreshEnabled;
@@ -442,10 +487,29 @@ export class ArchpiRuntime {
         if (raw.balanceAlertThresholds && typeof raw.balanceAlertThresholds === 'object') {
           settings.balanceAlertThresholds = raw.balanceAlertThresholds;
         }
+        if (typeof raw.rememberWindowBounds === 'boolean') {
+          settings.rememberWindowBounds = raw.rememberWindowBounds;
+        }
+        if (raw.windowBounds && typeof raw.windowBounds === 'object') {
+          settings.windowBounds = raw.windowBounds;
+        }
         this.userSettings = settings;
       } catch (err) {
         console.error('[archpi/runtime] failed to load settings.json:', err);
       }
+    }
+
+    if (existsSync(this.modelsDevCacheFile)) {
+      try {
+        const rawCache = JSON.parse(readFileSync(this.modelsDevCacheFile, 'utf8')) as ModelsDevCache | null;
+        this.modelsDevCache = rawCache ?? null;
+      } catch (err) {
+        console.error('[archpi/runtime] failed to load models-dev-cache.json:', err);
+      }
+    } else if (legacyModelsDevCache !== undefined) {
+      this.modelsDevCache = legacyModelsDevCache;
+      this.persistModelsDevCache();
+      this.persistSettings();
     }
 
     if (existsSync(this.stateFile)) {
@@ -470,6 +534,19 @@ export class ArchpiRuntime {
           for (const [k, v] of Object.entries(raw.agyConversations)) {
             if (typeof v === 'string' && v.trim()) {
               this.agyConversations.set(k, v);
+            }
+          }
+        }
+        if (raw.agyCumulativeUsage && typeof raw.agyCumulativeUsage === 'object') {
+          for (const [k, v] of Object.entries(raw.agyCumulativeUsage)) {
+            if (
+              v &&
+              typeof v === 'object' &&
+              typeof v.inputTokens === 'number' &&
+              typeof v.outputTokens === 'number' &&
+              typeof v.cacheReadTokens === 'number'
+            ) {
+              this.agyCumulativeUsage.set(k, v);
             }
           }
         }
@@ -568,7 +645,7 @@ export class ArchpiRuntime {
     this.syncPlanInMessages(plan);
     this.enqueueWrite(`plan:${plan.id}`, async () => {
       await mkdir(this.plansDir, { recursive: true });
-      await writeFile(join(this.plansDir, `${plan.id}.json`), JSON.stringify(plan, null, 2), 'utf8');
+      await this.writeJsonAtomic(join(this.plansDir, `${plan.id}.json`), plan);
     });
   }
 
@@ -609,16 +686,26 @@ export class ArchpiRuntime {
   }
 
   getUserSettings(): UserSettings {
-    return { ...this.userSettings };
+    return {
+      ...this.userSettings,
+      ...(this.modelsDevCache !== undefined ? { modelsDevCache: this.modelsDevCache } : {})
+    };
   }
 
   async updateSettings(patch: Partial<UserSettings>): Promise<UserSettings> {
-    this.userSettings = {
-      ...this.userSettings,
-      ...patch
-    };
-    this.persistSettings();
-    return { ...this.userSettings };
+    const { modelsDevCache: patchCache, ...restPatch } = patch;
+    if (Object.keys(restPatch).length > 0) {
+      this.userSettings = {
+        ...this.userSettings,
+        ...restPatch
+      };
+      this.persistSettings();
+    }
+    if ('modelsDevCache' in patch) {
+      this.modelsDevCache = patchCache ?? null;
+      this.persistModelsDevCache();
+    }
+    return this.getUserSettings();
   }
 
   async createProject(input: {
@@ -701,7 +788,11 @@ export class ArchpiRuntime {
     }
     this.windows.delete(windowId);
     this.messagesByWindow.delete(windowId);
+    const closedConvId = this.agyConversations.get(windowId);
     this.agyConversations.delete(windowId);
+    if (closedConvId) {
+      this.agyCumulativeUsage.delete(closedConvId);
+    }
     this.titleGenerationSeq.delete(windowId);
     this.persistState();
     this.deleteWindowMessages(windowId);
@@ -1343,7 +1434,7 @@ export class ArchpiRuntime {
             auth: { refreshToken }
           },
           () => {},
-          AbortSignal.timeout(15000)
+          AbortSignal.timeout(45000)
         );
         rawTitle = res.response;
       } else {
@@ -1403,7 +1494,12 @@ export class ArchpiRuntime {
       if (nextProviderId !== win.providerId) {
         win.providerId = nextProviderId;
         this.agents.delete(win.id);
-        this.agyConversations.delete(win.id);
+        const nextEntry = nextProviderId
+          ? this.userSettings.savedProviders?.find((p) => p.id === nextProviderId)
+          : undefined;
+        if (nextEntry && !this.isAgyProvider(nextEntry.config)) {
+          this.agyConversations.delete(win.id);
+        }
         winUpdated = true;
       }
     }
@@ -1557,6 +1653,29 @@ export class ArchpiRuntime {
     if (result.conversationId) {
       this.agyConversations.set(win.id, result.conversationId);
     }
+    const activeConvId = result.conversationId || this.agyConversations.get(win.id);
+    const prevUsage = activeConvId ? this.agyCumulativeUsage.get(activeConvId) : undefined;
+    let turnInput = totalInput;
+    let turnOutput = totalOutput;
+    let turnCacheRead = totalCacheRead;
+    if (
+      prevUsage &&
+      totalInput >= prevUsage.inputTokens &&
+      totalOutput >= prevUsage.outputTokens &&
+      totalCacheRead >= prevUsage.cacheReadTokens
+    ) {
+      turnInput = totalInput - prevUsage.inputTokens;
+      turnOutput = totalOutput - prevUsage.outputTokens;
+      turnCacheRead = totalCacheRead - prevUsage.cacheReadTokens;
+    }
+    if (activeConvId && (totalInput > 0 || totalOutput > 0 || totalCacheRead > 0)) {
+      this.agyCumulativeUsage.set(activeConvId, {
+        inputTokens: totalInput,
+        outputTokens: totalOutput,
+        cacheReadTokens: totalCacheRead
+      });
+      this.persistState();
+    }
 
     const endedAt = Date.now();
     const ttftMs = firstTokenAt !== null ? Math.max(0, firstTokenAt - turnStartedAt) : undefined;
@@ -1565,7 +1684,7 @@ export class ArchpiRuntime {
         ? Math.max(1, endedAt - firstTokenAt)
         : Math.max(1, endedAt - turnStartedAt);
     const tokensPerSec =
-      totalOutput > 0 ? Number(((totalOutput / genMs) * 1000).toFixed(1)) : undefined;
+      turnOutput > 0 ? Number(((turnOutput / genMs) * 1000).toFixed(1)) : undefined;
 
     const rawContent = accumulated || result.response || '(Done)';
     const extracted = extractAndStripImplicitTitle(rawContent);
@@ -1644,9 +1763,9 @@ export class ArchpiRuntime {
       plan: parsedPlan,
       meta: {
         model: win.model || cfg.modelId,
-        inputTokens: totalInput,
-        outputTokens: totalOutput,
-        cacheReadTokens: totalCacheRead,
+        inputTokens: turnInput,
+        outputTokens: turnOutput,
+        cacheReadTokens: turnCacheRead,
         ttftMs,
         tokensPerSec
       }
@@ -1745,7 +1864,9 @@ export class ArchpiRuntime {
       win.providerId = selection.id;
       if (selection.autoSwitched) {
         this.agents.delete(win.id);
-        this.agyConversations.delete(win.id);
+        if (!this.isAgyProvider(selection.config)) {
+          this.agyConversations.delete(win.id);
+        }
       }
       win.updatedAt = Date.now();
       this.persistState();
@@ -1779,7 +1900,9 @@ export class ArchpiRuntime {
               selection = nextSelection;
               win.providerId = nextSelection.id;
               this.agents.delete(win.id);
-              this.agyConversations.delete(win.id);
+              if (!this.isAgyProvider(nextSelection.config)) {
+                this.agyConversations.delete(win.id);
+              }
               win.updatedAt = Date.now();
               this.persistState();
               this.emit({ type: 'window_updated', window: { ...win } });
@@ -2043,7 +2166,9 @@ export class ArchpiRuntime {
           selection = nextSelection;
           win.providerId = nextSelection.id;
           this.agents.delete(win.id);
-          this.agyConversations.delete(win.id);
+          if (!this.isAgyProvider(nextSelection.config)) {
+            this.agyConversations.delete(win.id);
+          }
           win.updatedAt = Date.now();
           this.persistState();
           this.emit({ type: 'window_updated', window: { ...win } });

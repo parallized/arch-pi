@@ -451,6 +451,16 @@ app.whenReady().then(() => {
   });
 });
 
+let isFlushingBeforeQuit = false;
+app.on('before-quit', (event) => {
+  if (isFlushingBeforeQuit) return;
+  event.preventDefault();
+  isFlushingBeforeQuit = true;
+  void runtime.flushPendingWrites().finally(() => {
+    app.quit();
+  });
+});
+
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {
     app.quit();

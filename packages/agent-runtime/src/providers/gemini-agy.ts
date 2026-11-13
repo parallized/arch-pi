@@ -86,8 +86,7 @@ export class GeminiAgyAdapter implements AgentProviderAdapter {
       '--model',
       input.model,
       '--output-format',
-      'stream-json',
-      `-p=${input.prompt}`
+      'stream-json'
     ];
     if (input.conversationId) {
       agyArgs.push('--conversation', input.conversationId);
@@ -99,20 +98,46 @@ export class GeminiAgyAdapter implements AgentProviderAdapter {
       const child = spawn(spec.command, spec.args, {
         cwd: input.cwd,
         env: spec.env,
-        stdio: ['ignore', 'pipe', 'pipe'],
+        stdio: ['pipe', 'pipe', 'pipe'],
         windowsHide: true
       });
+
+      // Pass prompt via stdin instead of `-p=...` to avoid Windows cmdline quoting
+      // issues (e.g. unescaped `"` in agy_hook_runner.c) and command-line length limits.
+      child.stdin.on('error', () => {});
+      child.stdin.end(input.prompt, 'utf8');
 
       let conversationId = input.conversationId;
       let response = '';
       let thinking = '';
       let buffer = '';
       let stderrBuf = '';
+      let aborted = false;
+
+      const killProcessTree = () => {
+        if (process.platform === 'win32' && child.pid) {
+          spawn('taskkill', ['/T', '/F', '/PID', String(child.pid)], {
+            stdio: 'ignore',
+            windowsHide: true
+          });
+        }
+        try {
+          child.kill();
+        } catch {
+          // ignore
+        }
+      };
 
       const onAbort = () => {
-        child.kill();
+        aborted = true;
+        killProcessTree();
       };
-      signal?.addEventListener('abort', onAbort, { once: true });
+      if (signal?.aborted) {
+        aborted = true;
+        killProcessTree();
+      } else {
+        signal?.addEventListener('abort', onAbort, { once: true });
+      }
 
       const processLine = (rawLine: string) => {
         const line = rawLine.trim();
@@ -212,6 +237,13 @@ export class GeminiAgyAdapter implements AgentProviderAdapter {
         }
         if (code === 0) {
           resolve({ conversationId, response, thinking });
+        } else if (aborted || signal?.aborted) {
+          const reason =
+            signal?.reason instanceof Error
+              ? signal.reason
+              : new Error(typeof signal?.reason === 'string' ? signal.reason : 'agy aborted');
+          onEvent({ type: 'error', message: reason.message });
+          reject(reason);
         } else {
           const msg = stderrBuf.trim() || `agy exited with code ${code ?? 'unknown'}`;
           onEvent({ type: 'error', message: msg });
