@@ -96,7 +96,7 @@ arch-pi/
 ### 本地开发启动
 
 ```bash
-git clone <your-repo-url>
+git clone https://github.com/parallized/arch-pi.git
 cd arch-pi
 pnpm install
 pnpm dev
