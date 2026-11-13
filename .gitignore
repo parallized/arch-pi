@@ -1,0 +1,17 @@
+node_modules
+dist
+out
+.vite
+*.log
+*.tsbuildinfo
+*.pdb
+*.lib
+*.exp
+*.obj
+.DS_Store
+Thumbs.db
+.env
+.env.*
+!.env.example
+oauth-clients.json
+ghidra_agy/

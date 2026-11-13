@@ -1,0 +1,19 @@
+{
+  "name": "archpi",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Multi-agent Orchestrator -> Worker -> Reviewer desktop app powered by pi",
+  "bin": {
+    "archpi-dev": "./scripts/archpi-dev.mjs",
+    "makepi-dev": "./scripts/archpi-dev.mjs"
+  },
+  "scripts": {
+    "dev": "pnpm --filter @archpi/desktop dev",
+    "build": "pnpm -r build",
+    "typecheck": "pnpm -r typecheck"
+  },
+  "engines": {
+    "node": ">=20.0.0",
+    "pnpm": ">=9.0.0"
+  }
+}

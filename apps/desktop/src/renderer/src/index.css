@@ -1,0 +1,154 @@
+@import "tailwindcss";
+
+@font-face {
+  font-family: "childroundF";
+  src: url("./assets/ChillRoundF.ttf") format("truetype");
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+  unicode-range: U+0000-024F, U+2000-206F;
+}
+
+@font-face {
+  font-family: "MiSans";
+  src: url("./assets/MiSans-Regular.otf") format("opentype");
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+  unicode-range: U+3000-303F, U+4E00-9FFF, U+FF00-FFEF;
+}
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+    width: 100%;
+    overflow: hidden;
+    background-color: #0e0e0e;
+    color: #e5e5e5;
+    font-family: "childroundF", "MiSans", -apple-system, BlinkMacSystemFont, "Microsoft YaHei", sans-serif;
+  }
+}
+
+.use-system-font,
+.use-system-font * {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif !important;
+}
+
+/* Electron frameless drag region */
+.titlebar-drag {
+  -webkit-app-region: drag;
+}
+.titlebar-no-drag {
+  -webkit-app-region: no-drag;
+}
+
+/* Subtle dark scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+/* Staggered menu pop-in animation */
+@keyframes menuPopIn {
+  from {
+    opacity: 0;
+    transform: translateY(-4px) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes menuItemFadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-menu-pop {
+  transform-origin: top right;
+  animation: menuPopIn 160ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.animate-menu-item {
+  animation: menuItemFadeIn 180ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+@keyframes streamBlockIn {
+  from {
+    opacity: 0;
+    transform: translateY(3px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* Streaming markdown renders inline without re-triggering block fade/shift */
+
+@keyframes streamCaret {
+  0%, 45% {
+    opacity: 1;
+  }
+  55%, 100% {
+    opacity: 0.15;
+  }
+}
+
+.animate-stream-caret {
+  animation: streamCaret 700ms ease-in-out infinite;
+}
+
+@keyframes workerGlowBreathe {
+  0%, 100% {
+    box-shadow:
+      0 0 12px -2px rgba(255, 255, 255, 0.07),
+      0 0 14px -2px rgba(168, 85, 247, 0.09),
+      0 -2px 8px -2px rgba(255, 255, 255, 0.05);
+  }
+  50% {
+    box-shadow:
+      0 0 16px -2px rgba(255, 255, 255, 0.12),
+      0 0 20px -2px rgba(168, 85, 247, 0.16),
+      0 -3px 11px -2px rgba(192, 132, 252, 0.11);
+  }
+}
+
+@keyframes workerBorderDrift {
+  0%, 100% {
+    transform: translateX(-22%);
+    opacity: 0.5;
+  }
+  50% {
+    transform: translateX(22%);
+    opacity: 1;
+  }
+}
+
+.animate-worker-glow {
+  animation: workerGlowBreathe 4.5s ease-in-out infinite;
+}
+
+.animate-worker-border-drift {
+  animation: workerBorderDrift 5.5s ease-in-out infinite;
+  will-change: transform, opacity;
+}
