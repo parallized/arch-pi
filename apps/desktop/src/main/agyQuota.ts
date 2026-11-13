@@ -14,6 +14,26 @@ interface OAuthClientCredential {
   clientSecret: string;
 }
 
+/**
+ * Built-in public OAuth client credentials for Antigravity and Gemini CLI
+ * (installed-app public clients), so quota polling and token refresh work
+ * automatically after account import without extra configuration.
+ * Environment variables and `~/.archpi/oauth-clients.json` still take priority
+ * when custom OAuth client overrides are configured.
+ */
+const BUILTIN_OAUTH_CLIENTS: OAuthClientCredential[] = [
+  {
+    key: 'antigravity',
+    clientId: '1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com',
+    clientSecret: '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'
+  },
+  {
+    key: 'gemini_cli',
+    clientId: '681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com',
+    clientSecret: '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'
+  }
+];
+
 function parseOAuthClientList(raw: unknown): OAuthClientCredential[] {
   const items = Array.isArray(raw) ? raw : raw && typeof raw === 'object' ? [raw] : [];
   const out: OAuthClientCredential[] = [];
@@ -31,8 +51,8 @@ function parseOAuthClientList(raw: unknown): OAuthClientCredential[] {
 }
 
 /**
- * Resolve OAuth client credentials from environment variables or optional
- * `~/.archpi/oauth-clients.json` so no secrets are hardcoded in source control.
+ * Resolve OAuth client credentials: custom env vars and `~/.archpi/oauth-clients.json`
+ * take precedence, falling back to the built-in installed-app public clients.
  */
 function resolveOAuthClients(): OAuthClientCredential[] {
   const clients: OAuthClientCredential[] = [];
@@ -42,7 +62,7 @@ function resolveOAuthClients(): OAuthClientCredential[] {
     try {
       clients.push(...parseOAuthClientList(JSON.parse(jsonEnv)));
     } catch {
-      // Ignore malformed env JSON and fall back to discrete env vars / file
+      // Ignore malformed env JSON and fall back to discrete env vars / file / built-in
     }
   }
 
@@ -61,6 +81,8 @@ function resolveOAuthClients(): OAuthClientCredential[] {
   } catch {
     // Optional local OAuth client config file
   }
+
+  clients.push(...BUILTIN_OAUTH_CLIENTS);
 
   const seen = new Set<string>();
   return clients.filter((c) => {
