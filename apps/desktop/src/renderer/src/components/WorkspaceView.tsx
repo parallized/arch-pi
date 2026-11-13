@@ -970,6 +970,7 @@ const WindowPane: React.FC<{
   const [slashDismissed, setSlashDismissed] = useState(false);
   const [selectedRole, setSelectedRole] = useState<WindowRole | null>(null);
   const [selectedModel, setSelectedModel] = useState<string | null>(null);
+  const [selectedProviderId, setSelectedProviderId] = useState<string | undefined | null>(null);
   const [selectedThinking, setSelectedThinking] = useState<ThinkingLevel | '' | undefined>(
     undefined
   );
@@ -999,6 +1000,7 @@ const WindowPane: React.FC<{
   useEffect(() => {
     setSelectedRole(null);
     setSelectedModel(null);
+    setSelectedProviderId(null);
     setSelectedThinking(undefined);
     isAutoScrollPinnedRef.current = true;
   }, [windowId]);
@@ -1042,6 +1044,8 @@ const WindowPane: React.FC<{
 
   const activeRole = selectedRole ?? win.role;
   const activeModel = selectedModel ?? win.model;
+  const activeProviderId =
+    selectedProviderId !== null ? selectedProviderId : win.providerId;
   const effectiveThinking =
     selectedThinking !== undefined
       ? selectedThinking
@@ -1057,6 +1061,7 @@ const WindowPane: React.FC<{
     isAutoScrollPinnedRef.current = true;
     await sendMessage(win.id, trimmed, {
       model: activeModel || undefined,
+      ...(selectedProviderId !== null ? { providerId: activeProviderId } : {}),
       thinkingLevel: !isGeminiModel(activeModel) && effectiveThinking ? effectiveThinking : undefined
     });
   };
@@ -1227,6 +1232,7 @@ const WindowPane: React.FC<{
               voiceRef={voiceRef}
               role={selectedRole ?? win.role}
               model={selectedModel ?? win.model}
+              providerId={activeProviderId}
               thinking={
                 selectedThinking !== undefined
                   ? selectedThinking
@@ -1252,6 +1258,7 @@ const WindowPane: React.FC<{
                 setSelectedRole(nextRole);
                 setSelectedModel(nextModel);
               }}
+              onSelectProvider={(nextProviderId) => setSelectedProviderId(nextProviderId)}
               onChangeThinking={setSelectedThinking}
               onTranscript={(text) => setInput((prev) => (prev ? `${prev} ${text}` : text))}
               canSend={Boolean(input.trim()) && win.status !== 'working'}

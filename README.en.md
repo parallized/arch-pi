@@ -30,7 +30,7 @@ High-cost <strong>Master</strong> autonomously plans -> reviews; relay <strong>W
 
 ## Solutions
 
-1. **Antigravity multi-account parallelism without switching dropouts** — StreamJson lets the official `agy` CLI seamlessly continue sessions concurrently across accounts
+1. **Antigravity multi-account parallelism without switching dropouts** — Not a CPA reverse-proxy; StreamJson lets the official `agy` CLI seamlessly continue sessions concurrently across accounts, with aggregated multi-account 7d / 5h quota tracking
 2. **Native Orchestrator architecture for peak cost-performance** — Expensive quota-limited models understand complex requirements and review results; ultra-high-value Hydrogen / DeepSeek or any low-cost relay model you have does the heavy lifting
 
 ---

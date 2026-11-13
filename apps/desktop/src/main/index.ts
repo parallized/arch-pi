@@ -182,8 +182,12 @@ function registerIpcHandlers(): void {
   );
   ipcMain.handle(
     'archpi:sendMessage',
-    (_e, windowId: string, content: string, options?: { model?: string; thinkingLevel?: any }) =>
-      runtime.sendMessage(windowId, content, options)
+    (
+      _e,
+      windowId: string,
+      content: string,
+      options?: { model?: string; providerId?: string; thinkingLevel?: any }
+    ) => runtime.sendMessage(windowId, content, options)
   );
   ipcMain.handle('archpi:dispatchPlan', (_e, input: DispatchPlanInput) =>
     runtime.dispatchPlan(input)

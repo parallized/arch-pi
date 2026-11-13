@@ -317,6 +317,7 @@ export class ArchpiRuntime {
   private agents = new Map<string, Agent>();
   private agyConversations = new Map<string, string>();
   private titleGenerationSeq = new Map<string, number>();
+  private providerCooldownUntil = new Map<string, number>();
   private providerRegistry: ProviderRegistry;
   private plans = new Map<string, PlanSpec>();
   private tasks = new Map<string, TaskCard>();
@@ -661,6 +662,10 @@ export class ArchpiRuntime {
   }
 
   private createWindowSync(input: CreateWindowInput): AliveWindow {
+    const model = input.model?.trim() || this.resolveDefaultModelForRole(input.role);
+    const roleEntryProviderId = this.userSettings.roleModels?.[input.role]?.entries?.find(
+      (e) => e.id === model
+    )?.providerId;
     const win: AliveWindow = {
       id: uid('win'),
       projectId: input.projectId,
@@ -668,7 +673,8 @@ export class ArchpiRuntime {
       role: input.role,
       status: 'idle',
       branch: input.branch || 'main',
-      model: input.model?.trim() || this.resolveDefaultModelForRole(input.role),
+      model,
+      providerId: input.providerId?.trim() || roleEntryProviderId || undefined,
       contextSummary: 'Ready',
       unreadCount: 0,
       inboxQueue: [],
@@ -782,30 +788,233 @@ export class ArchpiRuntime {
     this.emit({ type: 'window_updated', window: { ...win } });
   }
 
-  private resolveProviderForModel(targetModelId?: string): ProviderConfig {
-    const modelId = targetModelId || this.providerConfig.modelId;
-    if (modelId && this.providerConfigs.length > 0) {
-      const matched = this.providerConfigs.find(
-        (cfg) =>
-          cfg.modelConfigs?.some((m) => m.id === modelId) ||
-          cfg.models?.includes(modelId) ||
-          cfg.modelId === modelId
-      );
-      if (matched) return matched;
+  private getAllProviderEntries(): Array<{ id?: string; config: ProviderConfig }> {
+    const saved = this.userSettings.savedProviders;
+    if (saved && saved.length > 0) {
+      return saved.map((entry) => ({ id: entry.id, config: entry.config }));
     }
-    return this.providerConfig;
+    if (this.providerConfigs.length > 0) {
+      return this.providerConfigs.map((config) => ({ id: undefined, config }));
+    }
+    return [];
+  }
+
+  private providerSupportsModel(
+    entry: { id?: string; config: ProviderConfig },
+    modelId: string
+  ): boolean {
+    if (!modelId) return false;
+    const cfg = entry.config;
+    if (
+      cfg.modelConfigs?.some((m) => m.id === modelId) ||
+      cfg.models?.includes(modelId) ||
+      cfg.modelId === modelId
+    ) {
+      return true;
+    }
+    if (entry.id && this.isAgyProvider(cfg)) {
+      const quotaModels = this.userSettings.agyQuotaByProviderId?.[entry.id]?.availableModels;
+      if (quotaModels?.includes(modelId)) return true;
+    }
+    return false;
+  }
+
+  private hasValidAuthForProvider(cfg: ProviderConfig, modelId?: string): boolean {
+    return Boolean(
+      this.resolveApiKey(modelId, cfg) ||
+        cfg.antigravityAuth?.refreshToken?.trim() ||
+        cfg.antigravityAuth?.email?.trim()
+    );
+  }
+
+  private getAgyQuotaGroup(modelId: string): 'argon' | 'claude' | 'gemini' | null {
+    const lower = modelId.trim().toLowerCase();
+    if (!lower) return null;
+    if (lower.includes('argon')) return 'argon';
+    if (lower.startsWith('claude') || lower.startsWith('gpt')) return 'claude';
+    if (lower.includes('gemini')) return 'gemini';
+    return null;
+  }
+
+  private isResetTimePast(resetTime?: string): boolean {
+    if (!resetTime) return false;
+    const ts = Date.parse(resetTime);
+    return Number.isFinite(ts) && ts <= Date.now();
+  }
+
+  private isProviderExhausted(
+    providerId: string | undefined,
+    cfg: ProviderConfig,
+    modelId: string
+  ): boolean {
+    const group = this.isAgyProvider(cfg) ? this.getAgyQuotaGroup(modelId) : null;
+    if (providerId) {
+      const cooldownKey = `${providerId}:${group ?? '*'}`;
+      const until = this.providerCooldownUntil.get(cooldownKey);
+      if (until && until > Date.now()) return true;
+      const wildcardUntil = this.providerCooldownUntil.get(`${providerId}:*`);
+      if (wildcardUntil && wildcardUntil > Date.now()) return true;
+
+      if (this.isAgyProvider(cfg) && group) {
+        const quota = this.userSettings.agyQuotaByProviderId?.[providerId];
+        const groupSummary = quota?.groups.find((g) => g.key === group);
+        if (groupSummary) {
+          if (
+            groupSummary.isWeeklyExhausted &&
+            !this.isResetTimePast(groupSummary.weekly?.resetTime)
+          ) {
+            return true;
+          }
+          if (
+            groupSummary.weekly &&
+            groupSummary.weekly.percentage <= 0 &&
+            !this.isResetTimePast(groupSummary.weekly.resetTime)
+          ) {
+            return true;
+          }
+          if (
+            groupSummary.fiveHour &&
+            groupSummary.fiveHour.percentage <= 0 &&
+            !this.isResetTimePast(groupSummary.fiveHour.resetTime)
+          ) {
+            return true;
+          }
+        }
+      }
+    }
+    return false;
+  }
+
+  private markProviderExhausted(
+    providerId: string | undefined,
+    cfg: ProviderConfig,
+    modelId: string,
+    cooldownMs = 5 * 60 * 1000
+  ): void {
+    if (!providerId) return;
+    const group = this.isAgyProvider(cfg) ? this.getAgyQuotaGroup(modelId) : null;
+    const key = `${providerId}:${group ?? '*'}`;
+    this.providerCooldownUntil.set(key, Date.now() + cooldownMs);
+  }
+
+  private isQuotaOrRateLimitError(errMsg: string): boolean {
+    return /429|quota|exhausted|rate[\s_-]*limit|resource_exhausted|too many requests|capacity/i.test(
+      errMsg
+    );
+  }
+
+  private resolveProviderSelection(
+    targetModelId?: string,
+    preferredProviderId?: string,
+    excludedProviderIds?: Set<string>
+  ): {
+    id?: string;
+    config: ProviderConfig;
+    matched: boolean;
+    autoSwitched: boolean;
+    switchedFromId?: string;
+  } {
+    const modelId = (targetModelId || this.providerConfig.modelId || '').trim();
+    const entries = this.getAllProviderEntries();
+    const matching = modelId ? entries.filter((e) => this.providerSupportsModel(e, modelId)) : [];
+    const available = matching.filter((e) => !(e.id && excludedProviderIds?.has(e.id)));
+
+    if (preferredProviderId) {
+      const preferred = available.find((e) => e.id === preferredProviderId);
+      if (preferred) {
+        const hasAuth = this.hasValidAuthForProvider(preferred.config, modelId);
+        const exhausted = this.isProviderExhausted(preferred.id, preferred.config, modelId);
+        if (hasAuth && !exhausted) {
+          return { id: preferred.id, config: preferred.config, matched: true, autoSwitched: false };
+        }
+        if (exhausted) {
+          const fallback = available.find(
+            (e) =>
+              e.id !== preferred.id &&
+              this.hasValidAuthForProvider(e.config, modelId) &&
+              !this.isProviderExhausted(e.id, e.config, modelId)
+          );
+          if (fallback) {
+            return {
+              id: fallback.id,
+              config: fallback.config,
+              matched: true,
+              autoSwitched: true,
+              switchedFromId: preferred.id
+            };
+          }
+        }
+        return { id: preferred.id, config: preferred.config, matched: true, autoSwitched: false };
+      }
+    }
+
+    if (available.length > 0) {
+      const ready = available.filter(
+        (e) =>
+          this.hasValidAuthForProvider(e.config, modelId) &&
+          !this.isProviderExhausted(e.id, e.config, modelId)
+      );
+      if (ready.length > 0) {
+        const activeId = this.userSettings.activeProviderId;
+        const activeMatch = activeId ? ready.find((e) => e.id === activeId) : undefined;
+        const picked = activeMatch ?? ready[0];
+        return {
+          id: picked.id,
+          config: picked.config,
+          matched: true,
+          autoSwitched: Boolean(
+            preferredProviderId &&
+              matching.some((e) => e.id === preferredProviderId) &&
+              picked.id !== preferredProviderId
+          ),
+          switchedFromId: preferredProviderId
+        };
+      }
+
+      const authed = available.find((e) => this.hasValidAuthForProvider(e.config, modelId));
+      const picked = authed ?? available[0];
+      return { id: picked.id, config: picked.config, matched: true, autoSwitched: false };
+    }
+
+    const activeEntry =
+      entries.find((e) => e.id && e.id === this.userSettings.activeProviderId) ?? entries[0];
+    const fallbackCfg =
+      entries.length === 0
+        ? this.providerConfig
+        : this.providerSupportsModel({ id: activeEntry?.id, config: this.providerConfig }, modelId)
+          ? this.providerConfig
+          : {
+              provider: 'anthropic' as const,
+              modelId,
+              apiKey: ''
+            };
+    return {
+      id: undefined,
+      config: fallbackCfg,
+      matched: entries.length === 0 && Boolean(this.providerConfig.modelId === modelId),
+      autoSwitched: false
+    };
+  }
+
+  private resolveProviderForModel(
+    targetModelId?: string,
+    preferredProviderId?: string
+  ): ProviderConfig {
+    return this.resolveProviderSelection(targetModelId, preferredProviderId).config;
   }
 
   private resolveActiveModelSettings(
     targetModelId?: string,
-    overrideThinking?: ArchpiThinkingLevel
+    overrideThinking?: ArchpiThinkingLevel,
+    preferredProviderId?: string,
+    providerCfg?: ProviderConfig
   ): {
     modelId: string;
     providerConfig: ProviderConfig;
     contextWindow?: number;
     thinkingLevel: 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
   } {
-    const cfg = this.resolveProviderForModel(targetModelId);
+    const cfg = providerCfg ?? this.resolveProviderForModel(targetModelId, preferredProviderId);
     const modelId = targetModelId || cfg.modelId;
     const matched = cfg.modelConfigs?.find((m) => m.id === modelId);
     const contextWindow = matched?.contextWindow ?? cfg.contextWindow;
@@ -826,10 +1035,12 @@ export class ArchpiRuntime {
 
   private resolvePiModel(
     targetModelId?: string,
-    overrideThinking?: ArchpiThinkingLevel
+    overrideThinking?: ArchpiThinkingLevel,
+    preferredProviderId?: string,
+    providerCfg?: ProviderConfig
   ): Model<any> {
     const { modelId, providerConfig: cfg, contextWindow, thinkingLevel } =
-      this.resolveActiveModelSettings(targetModelId, overrideThinking);
+      this.resolveActiveModelSettings(targetModelId, overrideThinking, preferredProviderId, providerCfg);
     const { provider, protocol, baseUrl } = cfg;
 
     let piApi: 'openai-completions' | 'openai-responses' | 'anthropic-messages' | 'google-generative-ai' =
@@ -926,13 +1137,17 @@ export class ArchpiRuntime {
 
   private getOrCreatePiAgent(
     win: AliveWindow,
-    overrideThinking?: ArchpiThinkingLevel
+    overrideThinking?: ArchpiThinkingLevel,
+    providerCfg?: ProviderConfig
   ): Agent {
-    const { modelId: effectiveModelId, thinkingLevel } = this.resolveActiveModelSettings(
-      win.model,
-      overrideThinking
+    const { modelId: effectiveModelId, thinkingLevel, providerConfig: resolvedCfg } =
+      this.resolveActiveModelSettings(win.model, overrideThinking, win.providerId, providerCfg);
+    const model = this.resolvePiModel(
+      effectiveModelId,
+      overrideThinking,
+      win.providerId,
+      resolvedCfg
     );
-    const model = this.resolvePiModel(effectiveModelId, overrideThinking);
 
     const existing = this.agents.get(win.id);
     if (existing) {
@@ -1022,7 +1237,7 @@ export class ArchpiRuntime {
         tools,
         ...(seedMessages.length > 0 ? { messages: seedMessages } : {})
       },
-      getApiKey: () => this.resolveApiKey(effectiveModelId)
+      getApiKey: () => this.resolveApiKey(effectiveModelId, resolvedCfg)
     });
 
     this.agents.set(win.id, agent);
@@ -1094,14 +1309,10 @@ export class ArchpiRuntime {
       const win = this.windows.get(windowId);
       if (!win || win.archived || win.titleManual) return;
 
-      const targetCfg = this.resolveProviderForModel(win.model);
+      const targetCfg = this.resolveProviderForModel(win.model, win.providerId);
       const apiKey = this.resolveApiKey(win.model, targetCfg);
       const isAgy = this.isAgyProvider(targetCfg);
-      const hasAuth = Boolean(
-        apiKey ||
-          targetCfg.antigravityAuth?.refreshToken?.trim() ||
-          targetCfg.antigravityAuth?.email?.trim()
-      );
+      const hasAuth = this.hasValidAuthForProvider(targetCfg, win.model);
       if (!hasAuth) return;
 
       const snippet = promptText.trim().slice(0, 800);
@@ -1136,7 +1347,7 @@ export class ArchpiRuntime {
         );
         rawTitle = res.response;
       } else {
-        const baseModel = this.resolvePiModel(win.model, 'none');
+        const baseModel = this.resolvePiModel(win.model, 'none', win.providerId, targetCfg);
         const model = { ...baseModel, reasoning: false };
         const res = await completeSimple(
           model,
@@ -1176,13 +1387,27 @@ export class ArchpiRuntime {
   async sendMessage(
     windowId: string,
     content: string,
-    options?: { model?: string; thinkingLevel?: ArchpiThinkingLevel }
+    options?: { model?: string; providerId?: string; thinkingLevel?: ArchpiThinkingLevel }
   ): Promise<void> {
     const win = this.windows.get(windowId);
     if (!win) throw new Error(`Window ${windowId} not found`);
 
+    let winUpdated = false;
     if (options?.model?.trim() && options.model.trim() !== win.model) {
       win.model = options.model.trim();
+      this.agents.delete(win.id);
+      winUpdated = true;
+    }
+    if (options && 'providerId' in options) {
+      const nextProviderId = options.providerId?.trim() || undefined;
+      if (nextProviderId !== win.providerId) {
+        win.providerId = nextProviderId;
+        this.agents.delete(win.id);
+        this.agyConversations.delete(win.id);
+        winUpdated = true;
+      }
+    }
+    if (winUpdated) {
       win.updatedAt = Date.now();
       this.persistState();
       this.emit({ type: 'window_updated', window: { ...win } });
@@ -1483,49 +1708,110 @@ export class ArchpiRuntime {
     };
     this.appendMessage(win.id, streamingMsg);
 
-    // If no API key / auth is set for the target model's provider, run local simulation
-    const targetCfg = this.resolveProviderForModel(win.model);
-    const hasAuth = Boolean(
-      this.resolveApiKey(win.model, targetCfg) ||
-        targetCfg.antigravityAuth?.refreshToken?.trim() ||
-        targetCfg.antigravityAuth?.email?.trim()
-    );
+    const excludedProviderIds = new Set<string>();
+    const allEntries = this.getAllProviderEntries();
+    const maxAttempts = Math.max(1, allEntries.filter((e) => this.providerSupportsModel(e, win.model)).length);
+
+    let selection = this.resolveProviderSelection(win.model, win.providerId, excludedProviderIds);
+    const hasAuth = this.hasValidAuthForProvider(selection.config, win.model);
+
     if (!hasAuth) {
-      await this.runSimulatedTurn(win, promptText, assistantMsgId);
+      const anyAuthedProvider = allEntries.some((e) => this.hasValidAuthForProvider(e.config));
+      const modelLabel = win.model || '未指定';
+      const errorText = anyAuthedProvider
+        ? `鉴权拦截：模型「${modelLabel}」未匹配到已配置有效鉴权的供应商。\n\n请前往左下角 Settings 将该模型添加到已鉴权的供应商列表中，或在输入框左下角切换为已配置的模型。`
+        : `鉴权拦截：当前模型「${modelLabel}」没有可用的 API Key 或 Antigravity 账号授权。\n\n请先点击左下角 Settings 添加并授权供应商后再发送消息。`;
+      const errMsg: ChatMessage = {
+        id: assistantMsgId,
+        windowId: win.id,
+        role: 'assistant',
+        content: errorText,
+        timestamp: Date.now(),
+        isStreaming: false
+      };
+      this.replaceMessage(win.id, assistantMsgId, errMsg);
+      this.emit({
+        type: 'message_done',
+        windowId: win.id,
+        messageId: assistantMsgId,
+        message: errMsg
+      });
+      this.setWindowStatus(win.id, 'idle', 'Auth Required');
       await this.drainInboxQueue(win);
       return;
     }
 
-    if (this.isAgyProvider(targetCfg)) {
-      try {
-        await this.runAgyTurn(win, promptText, assistantMsgId, targetCfg);
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        const errMsg: ChatMessage = {
-          id: assistantMsgId,
-          windowId: win.id,
-          role: 'assistant',
-          content: `Error: ${msg}`,
-          timestamp: Date.now(),
-          isStreaming: false
-        };
-        this.replaceMessage(win.id, assistantMsgId, errMsg);
-        this.emit({
-          type: 'message_done',
-          windowId: win.id,
-          messageId: assistantMsgId,
-          message: errMsg
-        });
-        this.setWindowStatus(win.id, 'idle', 'Error');
+    if (selection.id && selection.id !== win.providerId) {
+      win.providerId = selection.id;
+      if (selection.autoSwitched) {
+        this.agents.delete(win.id);
+        this.agyConversations.delete(win.id);
       }
-      await this.drainInboxQueue(win);
-      return;
+      win.updatedAt = Date.now();
+      this.persistState();
+      this.emit({ type: 'window_updated', window: { ...win } });
     }
 
-    try {
-      const effectiveThinking =
-        overrideThinking ?? this.resolveDefaultThinkingForRole(win.role, win.model);
-      const agent = this.getOrCreatePiAgent(win, effectiveThinking);
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      const targetCfg = selection.config;
+
+      if (this.isAgyProvider(targetCfg)) {
+        try {
+          await this.runAgyTurn(win, promptText, assistantMsgId, targetCfg);
+          await this.drainInboxQueue(win);
+          return;
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          if (selection.id && this.isQuotaOrRateLimitError(msg)) {
+            this.markProviderExhausted(selection.id, targetCfg, win.model);
+            excludedProviderIds.add(selection.id);
+            const nextSelection = this.resolveProviderSelection(
+              win.model,
+              undefined,
+              excludedProviderIds
+            );
+            if (
+              nextSelection.id &&
+              !excludedProviderIds.has(nextSelection.id) &&
+              this.hasValidAuthForProvider(nextSelection.config, win.model) &&
+              !this.isProviderExhausted(nextSelection.id, nextSelection.config, win.model)
+            ) {
+              selection = nextSelection;
+              win.providerId = nextSelection.id;
+              this.agents.delete(win.id);
+              this.agyConversations.delete(win.id);
+              win.updatedAt = Date.now();
+              this.persistState();
+              this.emit({ type: 'window_updated', window: { ...win } });
+              continue;
+            }
+          }
+
+          const errMsg: ChatMessage = {
+            id: assistantMsgId,
+            windowId: win.id,
+            role: 'assistant',
+            content: `Error: ${msg}`,
+            timestamp: Date.now(),
+            isStreaming: false
+          };
+          this.replaceMessage(win.id, assistantMsgId, errMsg);
+          this.emit({
+            type: 'message_done',
+            windowId: win.id,
+            messageId: assistantMsgId,
+            message: errMsg
+          });
+          this.setWindowStatus(win.id, 'idle', 'Error');
+          await this.drainInboxQueue(win);
+          return;
+        }
+      }
+
+      try {
+        const effectiveThinking =
+          overrideThinking ?? this.resolveDefaultThinkingForRole(win.role, win.model);
+        const agent = this.getOrCreatePiAgent(win, effectiveThinking, targetCfg);
       const turnStartedAt = Date.now();
       let firstTokenAt: number | null = null;
       let totalInput = 0;
@@ -1736,9 +2022,34 @@ export class ArchpiRuntime {
         message: finalMsg
       });
       this.setWindowStatus(win.id, 'idle', 'Idle');
+      break;
     } catch (err) {
       console.error('[ArchpiRuntime] runWindowTurn error:', err);
       const errText = err instanceof Error ? err.message : String(err);
+      if (selection.id && this.isQuotaOrRateLimitError(errText)) {
+        this.markProviderExhausted(selection.id, targetCfg, win.model);
+        excludedProviderIds.add(selection.id);
+        const nextSelection = this.resolveProviderSelection(
+          win.model,
+          undefined,
+          excludedProviderIds
+        );
+        if (
+          nextSelection.id &&
+          !excludedProviderIds.has(nextSelection.id) &&
+          this.hasValidAuthForProvider(nextSelection.config, win.model) &&
+          !this.isProviderExhausted(nextSelection.id, nextSelection.config, win.model)
+        ) {
+          selection = nextSelection;
+          win.providerId = nextSelection.id;
+          this.agents.delete(win.id);
+          this.agyConversations.delete(win.id);
+          win.updatedAt = Date.now();
+          this.persistState();
+          this.emit({ type: 'window_updated', window: { ...win } });
+          continue;
+        }
+      }
       const finalMsg: ChatMessage = {
         id: assistantMsgId,
         windowId: win.id,
@@ -1755,6 +2066,8 @@ export class ArchpiRuntime {
         message: finalMsg
       });
       this.setWindowStatus(win.id, 'needs_you', 'Error');
+      break;
+    }
     }
 
     await this.drainInboxQueue(win);

@@ -170,7 +170,7 @@ interface ArchpiState {
   sendMessage: (
     windowId: string,
     content: string,
-    options?: { model?: string; thinkingLevel?: ThinkingLevel }
+    options?: { model?: string; providerId?: string; thinkingLevel?: ThinkingLevel }
   ) => Promise<void>;
   dispatchPlan: (input: DispatchPlanInput) => Promise<void>;
   requestReview: (input: {

@@ -126,6 +126,7 @@ export interface AliveWindow {
   status: WindowStatus;
   branch: string;
   model: string;
+  providerId?: string;
   contextSummary: string;
   unreadCount: number;
   inboxQueue: QueuedTask[];
@@ -219,6 +220,7 @@ export interface SavedProviderEntry {
 
 export interface RoleModelEntry {
   id: string;
+  providerId?: string;
   thinkingLevel?: ThinkingLevel;
 }
 
@@ -344,6 +346,7 @@ export interface CreateWindowInput {
   role: WindowRole;
   branch?: string;
   model?: string;
+  providerId?: string;
 }
 
 export interface DispatchPlanInput {
@@ -373,7 +376,7 @@ export interface ArchpiApi {
   sendMessage: (
     windowId: string,
     content: string,
-    options?: { model?: string; thinkingLevel?: ThinkingLevel }
+    options?: { model?: string; providerId?: string; thinkingLevel?: ThinkingLevel }
   ) => Promise<void>;
   dispatchPlan: (input: DispatchPlanInput) => Promise<void>;
   requestReview: (input: {

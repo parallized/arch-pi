@@ -30,7 +30,7 @@
 
 ## 解决方案
 
-1. **Antigravity 多号无法并行，切号打断** — StreamJson 允许官方 `agy` 无感继续会话
+1. **Antigravity 多号无法并行，切号打断** — 非 CPA 反代，StreamJson 允许官方 `agy` 无感继续会话，支持多号综合周限 / 5H 统计
 2. **原生 Orchestrator 架构，极致性价比** — 高价格限量模型理解复杂需求，审阅工作；性价比极高的 Hydrogen / DeepSeek 或者任何你能拿到的低价渠道模型干活
 
 ---
