@@ -22,12 +22,12 @@ const resourcesDir = app.isPackaged
 
 let mainWindow: BrowserWindow | null = null;
 const runtime = new ArchpiRuntime({
-  defaultProjectPath: process.cwd(),
+  defaultProjectPath: app.isPackaged ? homedir() : process.cwd(),
   resourcesDir
 });
 
 function createMainWindow(): void {
-  const iconPath = join(__dirname, '../../resources/icon.png');
+  const iconPath = join(resourcesDir, 'icon.png');
   const settings = runtime.getUserSettings();
   const savedBounds = settings.rememberWindowBounds !== false ? settings.windowBounds : undefined;
   const width = savedBounds?.width && savedBounds.width >= 600 ? savedBounds.width : 1380;

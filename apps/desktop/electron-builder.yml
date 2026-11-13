@@ -1,0 +1,44 @@
+appId: dev.archpi.desktop
+productName: Arch Pi
+copyright: Copyright © 2026 parallized
+directories:
+  output: ../release
+  buildResources: resources
+asar: true
+npmRebuild: false
+files:
+  - out/**/*
+  - package.json
+  - node_modules/**/*
+  - "!node_modules/**/*.map"
+  - "!node_modules/**/*.md"
+extraResources:
+  - from: resources
+    to: .
+    filter:
+      - agy_hook_runner.exe
+      - agy_rt_hook.dll
+      - icon.ico
+      - icon.png
+win:
+  icon: resources/icon.ico
+  executableName: Arch Pi
+  target:
+    - target: nsis
+      arch:
+        - x64
+    - target: portable
+      arch:
+        - x64
+nsis:
+  artifactName: Arch-Pi-${version}-win-${arch}-setup.${ext}
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  installerIcon: resources/icon.ico
+  uninstallerIcon: resources/icon.ico
+  shortcutName: Arch Pi
+portable:
+  artifactName: Arch-Pi-${version}-win-${arch}-portable.${ext}

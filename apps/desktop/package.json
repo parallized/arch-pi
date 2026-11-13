@@ -1,35 +1,39 @@
 {
   "name": "@archpi/desktop",
-  "version": "0.1.0",
+  "version": "0.9.0",
+  "description": "Orchestrator -> Worker AI desktop workspace powered by Pi Agent",
+  "author": "parallized",
   "private": true,
   "type": "module",
   "main": "./out/main/index.js",
   "scripts": {
     "dev": "electron-vite dev",
     "build": "electron-vite build",
+    "dist:win": "node ./scripts/pack-win.mjs",
     "preview": "electron-vite preview",
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json"
   },
   "dependencies": {
     "@archpi/agent-runtime": "workspace:*",
-    "@archpi/shared": "workspace:*",
-    "@lobehub/icons": "^6.15.1",
-    "iconoir-react": "^7.12.1",
-    "react-markdown": "^10.1.0",
-    "remark-gfm": "^4.0.1",
-    "zustand": "^5.0.3"
+    "@archpi/shared": "workspace:*"
   },
   "devDependencies": {
+    "@lobehub/icons": "^6.15.1",
     "@tailwindcss/vite": "^4.0.9",
     "@types/node": "^22.10.5",
     "@types/react": "^19.0.10",
     "@types/react-dom": "^19.0.4",
     "@vitejs/plugin-react": "^4.3.4",
     "electron": "^35.0.0",
+    "electron-builder": "^26.18.0",
     "electron-vite": "^3.0.0",
+    "iconoir-react": "^7.12.1",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1",
     "tailwindcss": "^4.0.9",
-    "typescript": "^5.7.3"
+    "typescript": "^5.7.3",
+    "zustand": "^5.0.3"
   }
 }
